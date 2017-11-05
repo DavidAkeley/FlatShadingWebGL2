@@ -1,0 +1,195 @@
+<!-- David Akeley 2017: WebGL 2 8-vertex flat shaded cube demo. -->
+
+<script type="text/javascript">
+    var canvas;
+    var gl;
+    
+    var modelview_uniform_id;
+    var buffers = {};
+    var attribs = { position:1, normal:0, color:2 };
+    
+    var old_spherical_coord = [  6, 0, 0 ];
+    var new_spherical_coord = [  3, 0, 0 ];
+    var last_position_update_time = 0.0;
+    
+    const vs_source = `#version 300 es
+    precision mediump float;
+    
+    uniform mat4 modelView;
+    uniform mat4 projection;
+    
+    layout(location=0) in vec3 normal;
+    layout(location=1) in vec3 position;
+    layout(location=2) in vec3 color;
+    
+    flat out vec4 varyingColor;
+    
+    void main() {
+        gl_Position = projection * modelView * vec4(position, 1);
+        vec4 transformedNormal = modelView * vec4(normal, 0);
+        float normalCameraZ = normalize(transformedNormal.xyz).z;
+        varyingColor = vec4(color * (normalCameraZ*normalCameraZ*.75 + .25), 1);
+    }
+    `;
+    
+    const fs_source = `#version 300 es
+    precision mediump float;
+    
+    flat in vec4 varyingColor;
+    out vec4 pixelColor;
+    
+    void main() { pixelColor = varyingColor; }
+    
+    // If you're reading this carefully, please for the love of God don't
+    // forget that color is 4D not 3D. Don't waste 2 hours like me declaring
+    // your final color as vec3 and wondering why everything is flickering.
+    // (If you use vec3, your alpha channel is garbage).
+    `;
+    
+    function init() {
+        // Chapter 1: Initialize OpenGL.
+        canvas = document.getElementById("my_canvas");
+        if (!canvas) {
+            alert("Where's my canvas?");
+            return;
+        }
+        gl = canvas.getContext("webgl2");
+        if (!gl) {
+            alert("No WebGL 2 for you!");
+            return;
+        }
+        gl.viewportWidth = canvas.width;
+        gl.viewportHeight = canvas.height;
+        gl.enable(gl.DEPTH_TEST);
+        
+        // Chapter 2: Compile and use shaders.
+        let program_id = gl.createProgram();
+        let vs_id = gl.createShader(gl.VERTEX_SHADER);
+        let fs_id = gl.createShader(gl.FRAGMENT_SHADER);
+        
+        gl.shaderSource(vs_id, vs_source);
+        gl.shaderSource(fs_id, fs_source);
+        gl.compileShader(vs_id);
+        gl.compileShader(fs_id);
+        
+        for (let shader_id of [ vs_id, fs_id ]) {
+            if (!gl.getShaderParameter(shader_id, gl.COMPILE_STATUS)) {
+                alert("shader error:\n" + gl.getShaderInfoLog(shader_id));
+                return;
+            }
+        }
+        
+        gl.attachShader(program_id, vs_id);
+        gl.attachShader(program_id, fs_id);
+        gl.linkProgram(program_id);
+        
+        if (!gl.getProgramParameter(program_id, gl.LINK_STATUS)) {
+            alert("shader link error:\n" + gl.getProgramInfoLog(program_id));
+            return;
+        }
+        gl.useProgram(program_id);
+        
+        // Chapter 3: Initialize buffers. (position, normal, color)
+        // The same vertex and element buffer will be bound for the whole program.
+        const vertex_data = Float32Array.of(
+            -1, 1, 1,   -1, 0, 0,   1, 0, 0,// 0 -x face provoking vertex
+            -1, -1, 1,  0, 0, 1,    1, 1, 0,// 1 +z face provoking vertex
+            1, -1, 1,   1, 0, 0,    0, 1, 1,// 2 +x face provoking vertex
+            1, 1, 1,    0, 0, 0,    0, 0, 0,// 3 unused as provoking vertex
+            -1, 1, -1,  0, 1, 0,    1, 0, 1,// 4 +y face provoking vertex
+            -1, -1, -1, 0, -1, 0,   0, 1, 0,// 5 -y face provoking vertex
+            1, -1, -1,  0, 0, 0,    0, 0, 0,// 6 unused as provoking vertex
+            1, 1, -1,   0, 0, -1,   0, 0, 1,// 7 -z face provoking vertex
+        );
+        const index_data = Uint16Array.of(
+            6, 7, 2, 7, 3, 2,   // +x face
+            4, 5, 0, 5, 1, 0,   // -x face
+            0, 3, 4, 3, 7, 4,   // +y face
+            6, 2, 5, 2, 1, 5,   // -y face
+            2, 3, 1, 3, 0, 1,   // +z face
+            6, 5, 7, 5, 4, 7,   // -z face
+        );
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.array = gl.createBuffer());
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.element = gl.createBuffer());
+        gl.bufferData(gl.ARRAY_BUFFER, vertex_data, gl.STATIC_DRAW);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, index_data, gl.STATIC_DRAW);
+        
+        // Chapter 4: Deal with the uniform variables.
+        const projection_uniform_id = gl.getUniformLocation(program_id, "projection");
+        modelview_uniform_id = gl.getUniformLocation(program_id, "modelView");
+        
+        gl.uniformMatrix4fv(projection_uniform_id, false, Float32Array.of(
+           3, 0, 0, 0,
+           0, 3, 0, 0,
+           0, 0, 0, 2,
+           0, 0,-1, 0,
+        ));
+        requestAnimationFrame(update);
+    }
+    
+    function update(ms) {
+        // Every 3 seconds (roughly) the camera will shift to a new position.
+        // We will store the start and end position and smoothly change
+        // the position using squared cosine.
+        if (ms - last_position_update_time > 3000) {
+            last_position_update_time = ms;
+            old_spherical_coord = new_spherical_coord;
+            new_spherical_coord = [
+                Math.random() * 1.2 + 3.6,
+                Math.random() * 2 * Math.PI,
+                Math.random() * Math.PI,
+            ];
+        }
+        // Find spherical coordinate of current camera position.
+        var w = Math.cos(5.235987e-04 * (ms - last_position_update_time));
+        w = w*w;
+        
+        const r = old_spherical_coord[0] * w + new_spherical_coord[0] * (1-w);
+        const theta = old_spherical_coord[1] * w + new_spherical_coord[1] * (1-w);
+        const phi = old_spherical_coord[2] * w + new_spherical_coord[2] * (1-w);
+        
+        const cos_theta = Math.cos(theta);
+        const sin_theta = Math.sin(theta);
+        const cos_phi = Math.cos(phi);
+        const sin_phi = Math.sin(phi);
+        
+        gl.uniformMatrix4fv(modelview_uniform_id, false, Float32Array.of(
+            -sin_theta,
+            -cos_theta * cos_phi,
+            -cos_theta * sin_phi,
+            0,
+            cos_theta,
+            -sin_theta * cos_phi,
+            -sin_theta * sin_phi,
+            0,
+            0,
+            sin_phi,
+            -cos_phi,
+            0,
+            0,
+            0,
+            r,
+            1
+        ));
+        
+        gl.clearColor(.3, .3, .3, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.array);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.element);
+        gl.enableVertexAttribArray(attribs.position);
+        gl.enableVertexAttribArray(attribs.normal);
+        gl.enableVertexAttribArray(attribs.color);
+        gl.vertexAttribPointer(attribs.position, 3, gl.FLOAT, 0, 36, 0);
+        gl.vertexAttribPointer(attribs.normal, 3, gl.FLOAT, 0, 36, 12);
+        gl.vertexAttribPointer(attribs.color, 3, gl.FLOAT, 0, 36, 24);
+        gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
+        requestAnimationFrame(update);
+    }
+</script>
+
+<body onload="init();">
+    <canvas id="my_canvas" style="border: none;" width="512" height="512"></canvas>
+</body>
+
+
+
